@@ -1,0 +1,102 @@
+service: relational-database-polling-worker
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: eu-west-1
+  eventBridge:
+    useCloudFormation: true
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action: "events:PutEvents"
+          Resource: !GetAtt EventBus.Arn
+  environment:
+    EVENT_BUS_ARN: !GetAtt EventBus.Arn
+    DATABASE_URL: ${file(./serverless.config.yml):databaseUrl}
+  ecr:
+    images:
+      outbox-worker:
+        path: ./
+        file: outbox-worker.Dockerfile
+
+functions:
+  create-product:
+    handler: create-product.handle
+    url: true
+    package:
+      individually: true
+      patterns:
+        - "!./**"
+        - "node_modules/**"
+        - "create-product.js"
+
+fargate:
+  vpc:
+    securityGroupIds: ${file(./serverless.config.yml):securityGroupIds}
+    subnetIds: ${file(./serverless.config.yml):subnetIds}
+    assignPublicIp: true
+  tasks:
+    outbox-worker:
+      image: outbox-worker
+
+resources:
+  Resources:
+    EventBus:
+      Type: AWS::Events::EventBus
+      Properties:
+        Name: "${self:service}-bus"
+
+    LogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /aws/events/${self:service}-bus
+
+    LogResourcePolicy:
+      Type: AWS::Logs::ResourcePolicy
+      Properties:
+        PolicyName: ${self:service}-ResourcePolicy
+        PolicyDocument: !Sub
+          - >
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "EventBridgetoCloudWatchLogsPolicy",
+                  "Effect": "Allow",
+                  "Principal": {
+                    "Service": [
+                      "delivery.logs.amazonaws.com",
+                      "events.amazonaws.com"
+                    ]
+                  },
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": [
+                    "${logArn}"
+                  ],
+                  "Condition": {
+                    "ArnEquals": {"aws:SourceArn": "${ruleArn}"}
+                  }
+                }
+              ]
+            }
+          - { logArn: !GetAtt LogGroup.Arn, ruleArn: !GetAtt LogEventRule.Arn }
+
+    LogEventRule:
+      Type: AWS::Events::Rule
+      Properties:
+        EventBusName: !GetAtt EventBus.Name
+        EventPattern:
+          account:
+            - !Sub "${AWS::AccountId}"
+        Targets:
+          - Id: "LogGroup"
+            Arn: !GetAtt LogGroup.Arn
+
+plugins:
+  - serverless-fargate

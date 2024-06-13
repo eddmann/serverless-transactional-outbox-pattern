@@ -1,0 +1,127 @@
+service: dynamodb-streams-change-data-capture
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: eu-west-1
+  eventBridge:
+    useCloudFormation: true
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action: "events:PutEvents"
+          Resource: !GetAtt EventBus.Arn
+        - Effect: Allow
+          Action: "dynamodb:*"
+          Resource:
+            - !GetAtt ProductTable.Arn
+            - !GetAtt EventOutboxTable.Arn
+  environment:
+    EVENT_BUS_ARN: !GetAtt EventBus.Arn
+    PRODUCT_TABLE_NAME: !Ref ProductTable
+    EVENT_OUTBOX_TABLE_NAME: !Ref EventOutboxTable
+
+functions:
+  create-product:
+    handler: create-product.handle
+    url: true
+    package:
+      individually: true
+      patterns:
+        - "!./**"
+        - "node_modules/**"
+        - "create-product.js"
+  event-outbox:
+    handler: event-outbox.handle
+    events:
+      - stream:
+          type: dynamodb
+          arn: !GetAtt EventOutboxTable.StreamArn
+    package:
+      individually: true
+      patterns:
+        - "!./**"
+        - "node_modules/**"
+        - "event-outbox.js"
+
+resources:
+  Resources:
+    EventBus:
+      Type: AWS::Events::EventBus
+      Properties:
+        Name: "${self:service}-bus"
+
+    LogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /aws/events/${self:service}-bus
+
+    LogResourcePolicy:
+      Type: AWS::Logs::ResourcePolicy
+      Properties:
+        PolicyName: ${self:service}-ResourcePolicy
+        PolicyDocument: !Sub
+          - >
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "EventBridgeToCloudWatchLogsPolicy",
+                  "Effect": "Allow",
+                  "Principal": {
+                    "Service": [
+                      "delivery.logs.amazonaws.com",
+                      "events.amazonaws.com"
+                    ]
+                  },
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": [
+                    "${logArn}"
+                  ],
+                  "Condition": {
+                    "ArnEquals": {"aws:SourceArn": "${ruleArn}"}
+                  }
+                }
+              ]
+            }
+          - { logArn: !GetAtt LogGroup.Arn, ruleArn: !GetAtt LogEventRule.Arn }
+
+    LogEventRule:
+      Type: AWS::Events::Rule
+      Properties:
+        EventBusName: !GetAtt EventBus.Name
+        EventPattern:
+          account:
+            - !Sub "${AWS::AccountId}"
+        Targets:
+          - Id: "LogGroup"
+            Arn: !GetAtt LogGroup.Arn
+
+    ProductTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        BillingMode: PAY_PER_REQUEST
+
+    EventOutboxTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        BillingMode: PAY_PER_REQUEST
+        StreamSpecification:
+          StreamViewType: NEW_IMAGE

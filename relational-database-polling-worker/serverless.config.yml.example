@@ -1,0 +1,5 @@
+databaseUrl: "postgresql://user:password@host.us-east-1.aws.neon.tech/database?sslmode=require"
+securityGroupIds:
+  - sg-1234
+subnetIds:
+  - subnet-1234
